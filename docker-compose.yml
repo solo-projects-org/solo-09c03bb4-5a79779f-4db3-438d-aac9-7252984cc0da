@@ -10,6 +10,9 @@ services:
       WATER_DATA_DIR: /data
       # 演示用：迁移时每个批次重写停顿秒数，留出窗口在网页上追加不兼容浓度
       MIGRATION_DELAY_SECONDS: "1.0"
+      # 故障注入演示开关（网页“④ 故障注入演示”与 /api/admin/faults）。
+      # 生产部署改为 "0" 即完全关闭，所有注入点变为空操作。
+      WATER_FAULT_ENABLED: "1"
     volumes:
       - water-data:/data
     restart: unless-stopped

@@ -12,6 +12,13 @@ def _int_env(name: str, default: int) -> int:
     return int(raw)
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class Settings:
     def __init__(self) -> None:
         # 数据卷根目录：SQLite 登记库与所有 Parquet 代目录都在其下
@@ -24,6 +31,8 @@ class Settings:
         self.MAX_UPLOAD_BYTES = _int_env(
             "MAX_UPLOAD_BYTES", 16 * 1024 * 1024
         )
+        # 故障注入开关：演示/测试环境默认开启，生产设 WATER_FAULT_ENABLED=0 关闭
+        self.FAULT_ENABLED = _bool_env("WATER_FAULT_ENABLED", True)
 
     @property
     def db_path(self) -> Path:

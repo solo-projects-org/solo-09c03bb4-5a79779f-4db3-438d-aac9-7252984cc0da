@@ -14,23 +14,28 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from .catalog import create_catalog
 from .config import Settings
 from .csv_utils import CsvValidationError, parse_csv
+from .faults import FaultInjector, VALID_POINTS
 from .migration import MigrationRunningError, create_migration_service
 from .storage import CONC_FIELD, SAMPLE_FIELD, read_parquet
 
 
-def create_app(settings: Settings) -> FastAPI:
+def create_app(settings: Settings, faults: Optional[FaultInjector] = None) -> FastAPI:
     # 数据卷目录先建好，Catalog 连接与建表才不会因目录缺失失败
     settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
     settings.parquet_root.mkdir(parents=True, exist_ok=True)
 
     catalog = create_catalog(settings.db_path)
+    if faults is None:
+        faults = FaultInjector.from_env()
+    if not settings.FAULT_ENABLED:
+        faults.enabled = False
     service = create_migration_service(
-        catalog, settings.parquet_root, settings.MIGRATION_DELAY_SECONDS
+        catalog, settings.parquet_root, settings.MIGRATION_DELAY_SECONDS, faults
     )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # 启动：崩溃恢复（遗留 running 判失败）+ 初代初始化
+        # 启动：按相位崩溃恢复（preparing 判失败 / publishing 续提或回滚）+ 初代初始化
         service.startup()
         try:
             yield
@@ -48,6 +53,15 @@ def create_app(settings: Settings) -> FastAPI:
     app.state.settings = settings
     app.state.catalog = catalog
     app.state.service = service
+    app.state.faults = faults
+
+    @app.exception_handler(RuntimeError)
+    async def runtime_error_handler(request: Request, exc: RuntimeError) -> JSONResponse:
+        # 活动代不完整等一致性错误：明确拒绝服务，绝不返回残缺的一套表
+        return JSONResponse(
+            status_code=503,
+            content={"detail": f"数据一致性检查未通过，已拒绝读取: {exc}"},
+        )
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
@@ -214,6 +228,43 @@ def create_app(settings: Settings) -> FastAPI:
     def all_migrations(request: Request) -> dict:
         svc = request.app.state.service
         return {"migrations": svc.list_migrations()}
+
+    # ---------------- 故障注入（仅演示/测试；生产用 WATER_FAULT_ENABLED=0 关闭） ----------------
+
+    @app.get("/api/admin/faults")
+    def get_faults(request: Request) -> dict:
+        faults: FaultInjector = request.app.state.faults
+        if not request.app.state.settings.FAULT_ENABLED:
+            return {"enabled": False, "message": "故障注入已被环境变量关闭"}
+        return faults.status()
+
+    @app.post("/api/admin/faults")
+    def configure_faults(request: Request, payload: dict) -> dict:
+        faults: FaultInjector = request.app.state.faults
+        if not request.app.state.settings.FAULT_ENABLED:
+            raise HTTPException(403, "故障注入已被 WATER_FAULT_ENABLED=0 关闭")
+        point = payload.get("point")
+        if point is not None and point not in VALID_POINTS:
+            raise HTTPException(
+                422, f"未知注入点 {point!r}，可选: {sorted(VALID_POINTS)}"
+            )
+        mode = payload.get("mode")
+        if mode is not None and mode not in ("raise", "exit"):
+            raise HTTPException(422, "mode 只能是 raise 或 exit")
+        return faults.configure(
+            enabled=payload.get("enabled", True),
+            point=point,
+            mode=mode,
+            every=payload.get("every", 1),
+            prob=payload.get("prob", 0.0),
+            one_shot=payload.get("one_shot", True),
+        )
+
+    @app.delete("/api/admin/faults")
+    def clear_faults(request: Request) -> dict:
+        faults: FaultInjector = request.app.state.faults
+        faults.reset()
+        return faults.status()
 
     return app
 

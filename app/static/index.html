@@ -101,9 +101,41 @@
   <section class="card">
     <h2>迁移历史</h2>
     <table id="migTable">
-      <thead><tr><th>ID</th><th>状态</th><th>目标模式</th><th>开始</th><th>结束</th><th>详情</th></tr></thead>
+      <thead><tr><th>ID</th><th>状态</th><th>相位</th><th>目标模式</th><th>开始</th><th>结束</th><th>详情</th></tr></thead>
       <tbody></tbody>
     </table>
+  </section>
+
+  <section class="card" id="faultCard">
+    <h2>④ 故障注入演示（写盘错误 / 登记失败 / 切换时退出）</h2>
+    <p class="muted" style="margin:0 0 10px">
+      仅用于本地演示：在选定阶段注入一次性故障，随后按上面的流程发起迁移，
+      即可观察“失败保留原表 / 重启恢复 / 重试成功”。生产环境用
+      <code>WATER_FAULT_ENABLED=0</code> 关闭后本卡片不可用。
+    </p>
+    <div class="row">
+      <label>注入点
+        <select id="faultPoint" style="padding:7px 9px;border:1px solid var(--bd);border-radius:8px;font-size:14px;min-width:180px">
+          <option value="">（关闭注入）</option>
+          <option value="staging_write">迁移暂存写盘错误</option>
+          <option value="db_commit">迁移登记提交失败</option>
+          <option value="promote">目录切换失败</option>
+          <option value="promote_exit">目录切换时进程退出（重启恢复）</option>
+          <option value="staging_cleanup">失败后清理再次失败</option>
+          <option value="upload_write">上传写盘错误</option>
+          <option value="upload_register">上传登记失败（回滚文件）</option>
+        </select>
+      </label>
+      <label>方式
+        <select id="faultMode" style="padding:7px 9px;border:1px solid var(--bd);border-radius:8px;font-size:14px">
+          <option value="raise">抛错（业务内失败/回滚）</option>
+          <option value="exit">硬退出进程（模拟 kill -9）</option>
+        </select>
+      </label>
+      <button class="secondary" onclick="armFault()">武装一次性故障</button>
+      <button class="secondary" onclick="clearFault()">清除</button>
+    </div>
+    <div class="msg" id="faultMsg"></div>
   </section>
 </main>
 
@@ -199,7 +231,7 @@ async function refreshAll(){
   const cur=await api("/api/migrations/current");
   const banner=document.getElementById("migrationBanner");
   banner.innerHTML = cur.running
-    ? `<p style="margin:10px 0 0"><span class="pill run">迁移 #${cur.migration.id} 运行中 → decimal128(${cur.migration.target_precision},${cur.migration.target_scale})</span>
+    ? `<p style="margin:10px 0 0"><span class="pill run">迁移 #${cur.migration.id} 运行中（相位 ${cur.migration.phase}）→ decimal128(${cur.migration.target_precision},${cur.migration.target_scale})</span>
        <span class="muted">期间上传/查询/下载照常，读到的仍是完整旧代</span></p>` : "";
   await loadRows();
   const migs=await api("/api/migrations");
@@ -209,12 +241,41 @@ async function refreshAll(){
     const detail=m.detail?JSON.stringify(m.detail, null, 0):"";
     const tr=document.createElement("tr");
     tr.innerHTML=`<td>${m.id}</td><td><span class="pill ${cls}">${m.status}</span></td>
+      <td>${m.phase||""}</td>
       <td>decimal128(${m.target_precision},${m.target_scale})</td>
       <td class="muted">${m.started_at||""}</td><td class="muted">${m.finished_at||""}</td>
       <td class="muted" style="max-width:380px;overflow:auto">${detail.replace(/</g,"&lt;")}</td>`;
     mt.appendChild(tr);
   });
 }
+
+async function armFault(){
+  const point=document.getElementById("faultPoint").value;
+  const mode=document.getElementById("faultMode").value;
+  if(!point){ setMsg("faultMsg","请先选择注入点","warn"); return; }
+  try{
+    const r=await api("/api/admin/faults",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({point,mode,one_shot:true})});
+    setMsg("faultMsg",`已武装一次性故障：${r.point} / ${r.mode}。现在发起迁移或上传即可触发；触发后自动解除。`,"warn");
+  }catch(e){ setMsg("faultMsg","武装失败："+e.message,"err"); }
+}
+
+async function clearFault(){
+  const r=await api("/api/admin/faults",{method:"DELETE"});
+  document.getElementById("faultPoint").value="";
+  setMsg("faultMsg","已清除全部故障注入（当前 point=" + r.point + "）","ok");
+}
+
+async function loadFaultAvailability(){
+  try{
+    const r=await api("/api/admin/faults");
+    if(r.enabled===false){
+      document.getElementById("faultCard").style.display="none";
+    }
+  }catch(e){ document.getElementById("faultCard").style.display="none"; }
+}
+loadFaultAvailability();
 refreshAll();
 setInterval(async()=>{ const c=await api("/api/migrations/current"); if(c.running) refreshAll(); }, 2000);
 </script>
