@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>水质浓度 Parquet 精度管理</title>
+<style>
+  :root { --bd:#d7dde5; --bg:#f5f7fa; --pri:#1c64f2; --ok:#057a55; --warn:#c27803; --err:#cb0d0d; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: "PingFang SC","Microsoft YaHei",system-ui,sans-serif; background:var(--bg); color:#1f2937; }
+  header { background:#0f2a4a; color:#fff; padding:16px 24px; }
+  header h1 { margin:0; font-size:20px; }
+  header p { margin:6px 0 0; font-size:13px; opacity:.85; }
+  main { max-width:1080px; margin:24px auto; padding:0 16px; display:grid; gap:20px; }
+  .card { background:#fff; border:1px solid var(--bd); border-radius:10px; padding:18px 20px; }
+  .card h2 { margin:0 0 12px; font-size:16px; }
+  .row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
+  .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px; font-weight:600; }
+  .pill.ok { background:#def7ec; color:var(--ok); }
+  .pill.run { background:#e1efff; color:var(--pri); }
+  .pill.fail { background:#fde8e8; color:var(--err); }
+  table { border-collapse:collapse; width:100%; font-size:13px; margin-top:10px; }
+  th,td { border:1px solid var(--bd); padding:6px 9px; text-align:left; }
+  th { background:#f0f3f7; }
+  button { cursor:pointer; border:1px solid var(--pri); background:var(--pri); color:#fff; border-radius:8px; padding:8px 14px; font-size:14px; }
+  button.secondary { background:#fff; color:var(--pri); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  input[type=number], input[type=text] { padding:7px 9px; border:1px solid var(--bd); border-radius:8px; width:110px; font-size:14px; }
+  input[type=file] { font-size:13px; }
+  pre { background:#0b1b30; color:#d6e4ff; padding:12px; border-radius:8px; font-size:12px; overflow:auto; max-height:280px; }
+  .muted { color:#6b7280; font-size:12px; }
+  .msg { margin-top:10px; font-size:13px; white-space:pre-wrap; }
+  .msg.err { color:var(--err); } .msg.ok { color:var(--ok); } .msg.warn { color:var(--warn); }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+  @media (max-width:820px){ .grid2{grid-template-columns:1fr;} }
+  code { background:#eef2f7; padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>水质实验室 · 浓度明细 Parquet 精度管理</h1>
+  <p>浓度列 decimal128 精确存储（不经浮点）· 迁移期间上传/查询/下载不中断 · 全量兼容才一起切换</p>
+</header>
+<main>
+  <section class="card">
+    <h2>当前活动模式（每次查询/下载只读这一套完整代）</h2>
+    <div class="row">
+      <span class="pill ok" id="schemaPill">加载中…</span>
+      <span class="muted" id="genInfo"></span>
+    </div>
+    <div id="migrationBanner"></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>① 上传批次 CSV（两列：样本号,浓度）</h2>
+      <div class="row">
+        <input type="file" id="csvFile" accept=".csv,text/csv" />
+        <button onclick="upload()">上传</button>
+      </div>
+      <p class="muted" style="margin:10px 0 6px">演示数据（可保存为 .csv 后上传，或直接点按钮载入内容）：</p>
+      <div class="row">
+        <button class="secondary" onclick="loadSample('compatible')">载入兼容样例</button>
+        <button class="secondary" onclick="loadSample('incompatible')">载入不兼容浓度样例</button>
+      </div>
+      <pre id="samplePreview" style="max-height:150px"></pre>
+      <div class="msg" id="uploadMsg"></div>
+    </section>
+
+    <section class="card">
+      <h2>② 发起精度迁移（后台重写全部批次，只运行一次）</h2>
+      <div class="row">
+        <label>目标总位数 <input type="number" id="precision" value="18" min="1" max="38" /></label>
+        <label>小数位数 <input type="number" id="scale" value="2" min="0" max="38" /></label>
+        <button onclick="startMigration()">启动迁移</button>
+      </div>
+      <p class="muted" style="margin:10px 0 0">
+        建议演示：目标设为 <code>18 / 2</code>。迁移进行中（每个批次有停顿）在左侧上传
+        <b>不兼容浓度样例</b>，提交时会列出不兼容样本并失败，原表与新批都保留；
+        再上传兼容样例并重新发起，即可成功切换，下载到的全套 Parquet 均为新模式。
+      </p>
+      <div class="msg" id="migrationMsg"></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>③ 查询（活动代，浓度为精确十进制文本，空值保留）</h2>
+    <div class="row">
+      <input type="text" id="qSample" placeholder="样本号（可选精确匹配）" style="width:220px" />
+      <button class="secondary" onclick="loadRows()">查询</button>
+      <button class="secondary" onclick="downloadZip()">下载当前表 Parquet 包 (zip)</button>
+      <button class="secondary" onclick="refreshAll()">刷新</button>
+    </div>
+    <table id="rowsTable">
+      <thead><tr><th>批次</th><th>样本号</th><th>浓度（Decimal 文本）</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="muted" id="rowsInfo"></p>
+  </section>
+
+  <section class="card">
+    <h2>迁移历史</h2>
+    <table id="migTable">
+      <thead><tr><th>ID</th><th>状态</th><th>目标模式</th><th>开始</th><th>结束</th><th>详情</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+const SAMPLES = {
+  compatible: "样本号,浓度\nWQ-1001,12.340000\nWQ-1002,0.000000\nWQ-1003,\nWQ-1004,-7.500000\nWQ-1005,100.000000\n",
+  // 迁移到 (18,2) 时：第 2 行有非零尾数会丢精度；第 4 行整数部分在 (10,2) 下会溢出
+  incompatible: "样本号,浓度\nWQ-2001,8.800000\nWQ-2002,3.145900\nWQ-2003,\nWQ-2004,123456789.120000\n"
+};
+let currentCsvName = null;
+
+function setMsg(id, text, kind){ const el=document.getElementById(id); el.className="msg "+(kind||""); el.textContent=text||""; }
+async function api(path, opts){ const r=await fetch(path,opts); const data=await r.json().catch(()=>({})); if(!r.ok) throw Object.assign(new Error(data.detail||r.statusText),{data}); return data; }
+
+function loadSample(kind){
+  const text=SAMPLES[kind];
+  document.getElementById("samplePreview").textContent=text;
+  currentCsvName = kind + ".csv";
+  // 转成 File 挂到上传控件，方便直接点“上传”
+  const file=new File([text], currentCsvName, {type:"text/csv"});
+  const dt=new DataTransfer(); dt.items.add(file);
+  document.getElementById("csvFile").files=dt.files;
+}
+
+async function upload(){
+  const f=document.getElementById("csvFile").files[0];
+  if(!f){ setMsg("uploadMsg","请先选择 CSV 或载入演示样例","warn"); return; }
+  const fd=new FormData(); fd.append("file", f);
+  try{
+    const r=await api("/api/batches",{method:"POST",body:fd});
+    setMsg("uploadMsg",`上传成功：批次 ${r.batch_id}，${r.row_count} 行，写入代 gen-${r.gen_id}，模式 decimal128(${r.precision},${r.scale})`,"ok");
+    await refreshAll();
+  }catch(e){ setMsg("uploadMsg","上传失败："+e.message,"err"); }
+}
+
+async function startMigration(){
+  const p=parseInt(document.getElementById("precision").value,10);
+  const s=parseInt(document.getElementById("scale").value,10);
+  try{
+    const r=await api(`/api/migrations?target_precision=${p}&target_scale=${s}`,{method:"POST"});
+    setMsg("migrationMsg",`迁移 #${r.migration_id} 已启动，后台重写中…可立即继续上传/查询/下载`,"ok");
+    pollMigration(r.migration_id);
+  }catch(e){ setMsg("migrationMsg","迁移被拒绝："+e.message,"err"); }
+}
+
+async function pollMigration(id){
+  for(let i=0;i<60;i++){
+    await new Promise(r=>setTimeout(r,500));
+    const m=await api("/api/migrations/"+id);
+    if(m.status==="running"){ continue; }
+    if(m.status==="committed"){
+      setMsg("migrationMsg",`迁移 #${id} 已提交：新模式 decimal128(${m.target_precision},${m.target_scale})，全套文件已一起启用`,"ok");
+    }else{
+      const bad=(m.detail&&m.detail.incompatible_samples)||[];
+      const lines=bad.map(b=>`  - 批次 ${b.batch_id||"?"} 样本 ${b.sample_id} 浓度 ${b.concentration}：${b.reason}`);
+      setMsg("migrationMsg",`迁移 #${id} 失败，原表及已接收新批均保留。不兼容样本 ${bad.length} 条：\n`+lines.join("\n"),"err");
+    }
+    await refreshAll();
+    return;
+  }
+  setMsg("migrationMsg","迁移轮询超时，请手动刷新","warn");
+}
+
+async function downloadZip(){
+  const r=await fetch("/api/download");
+  if(!r.ok){ setMsg("uploadMsg","下载失败："+r.status,"err"); return; }
+  const blob=await r.blob();
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a"); a.href=url;
+  a.download=(r.headers.get("Content-Disposition")||"").split("filename=")[1]?.replaceAll('"','')||"parquet.zip";
+  a.click(); URL.revokeObjectURL(url);
+}
+
+async function loadRows(){
+  const q=document.getElementById("qSample").value.trim();
+  const url="/api/rows?limit=500"+(q?("&sample_id="+encodeURIComponent(q)):"");
+  const d=await api(url);
+  const tb=document.querySelector("#rowsTable tbody"); tb.innerHTML="";
+  d.rows.forEach(r=>{
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td>${r.batch_id}</td><td>${r["样本号"]}</td><td>${r["浓度"]===null?"<span class='muted'>(空值)</span>":r["浓度"]}</td>`;
+    tb.appendChild(tr);
+  });
+  document.getElementById("rowsInfo").textContent=
+    `代 gen-${d.gen_id} · ${d.schema} · 命中 ${d.total_matched} 行（展示 ${d.rows.length} 行）`;
+}
+
+async function refreshAll(){
+  const schema=await api("/api/schema");
+  document.getElementById("schemaPill").textContent=`浓度列 ${schema.concentration_type}`;
+  document.getElementById("genInfo").textContent=
+    `活动代 gen-${schema.gen_id} · 批次 ${schema.batch_count} · 总行数 ${schema.total_rows} · 启用时间 ${schema.activated_at}`;
+  const cur=await api("/api/migrations/current");
+  const banner=document.getElementById("migrationBanner");
+  banner.innerHTML = cur.running
+    ? `<p style="margin:10px 0 0"><span class="pill run">迁移 #${cur.migration.id} 运行中 → decimal128(${cur.migration.target_precision},${cur.migration.target_scale})</span>
+       <span class="muted">期间上传/查询/下载照常，读到的仍是完整旧代</span></p>` : "";
+  await loadRows();
+  const migs=await api("/api/migrations");
+  const mt=document.querySelector("#migTable tbody"); mt.innerHTML="";
+  migs.migrations.forEach(m=>{
+    const cls=m.status==="committed"?"ok":(m.status==="running"?"run":"fail");
+    const detail=m.detail?JSON.stringify(m.detail, null, 0):"";
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td>${m.id}</td><td><span class="pill ${cls}">${m.status}</span></td>
+      <td>decimal128(${m.target_precision},${m.target_scale})</td>
+      <td class="muted">${m.started_at||""}</td><td class="muted">${m.finished_at||""}</td>
+      <td class="muted" style="max-width:380px;overflow:auto">${detail.replace(/</g,"&lt;")}</td>`;
+    mt.appendChild(tr);
+  });
+}
+refreshAll();
+setInterval(async()=>{ const c=await api("/api/migrations/current"); if(c.running) refreshAll(); }, 2000);
+</script>
+</body>
+</html>

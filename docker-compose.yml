@@ -1,0 +1,23 @@
+services:
+  water-quality:
+    build: .
+    image: water-quality-parquet:1.0.0
+    container_name: water-quality-parquet
+    ports:
+      - "8000:8000"
+    environment:
+      # 数据卷内持久化 SQLite 登记库与全部 Parquet 代目录
+      WATER_DATA_DIR: /data
+      # 演示用：迁移时每个批次重写停顿秒数，留出窗口在网页上追加不兼容浓度
+      MIGRATION_DELAY_SECONDS: "1.0"
+    volumes:
+      - water-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  water-data:
